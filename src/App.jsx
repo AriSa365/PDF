@@ -116,23 +116,39 @@ export default function App() {
       setViewportSize({width:viewport.width,height:viewport.height})
       await p.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
       const tc = await p.getTextContent()
+      const cleanFamily = (raw='') => {
+        let f = String(raw || '').replace(/^[A-Z]{6}\+/, '').trim()
+        const aliases = [
+          [/ArialMT/i, 'Arial'], [/Arial-BoldMT/i, 'Arial'],
+          [/TimesNewRomanPSMT/i, 'Times New Roman'], [/TimesNewRomanPS/i, 'Times New Roman'],
+          [/CourierNewPSMT/i, 'Courier New'], [/Calibri/i, 'Calibri'],
+          [/HelveticaNeue/i, 'Helvetica Neue'], [/Helvetica/i, 'Helvetica']
+        ]
+        for (const [re,name] of aliases) if (re.test(f)) return name
+        return f || 'Helvetica'
+      }
       const runs = tc.items.filter(it => it.str?.trim()).map(it => {
         const tx = pdfjsLib.Util.transform(viewport.transform, it.transform)
-        const h = Math.max(6, Math.hypot(tx[2], tx[3]) || Math.hypot(tx[0], tx[1]))
-        let family = 'Helvetica'
+        const displayPx = Math.max(5, Math.hypot(tx[2], tx[3]) || Math.hypot(tx[0], tx[1]))
+        const style = tc.styles?.[it.fontName] || {}
+        let family = style.fontFamily || 'Helvetica'
         try {
           const fo = p.commonObjs.get(it.fontName)
           family = fo?.fontFamily || fo?.fallbackName || fo?.name || family
         } catch {}
+        family = cleanFamily(family)
         return {
           text: it.str,
           x: tx[4] / viewport.width,
-          y: (tx[5] - h) / viewport.height,
+          y: (tx[5] - displayPx) / viewport.height,
           w: Math.max(.005, (it.width * viewport.scale) / viewport.width),
-          h: h / viewport.height,
-          size: h,
+          h: displayPx / viewport.height,
+          // Store size in PDF-ish points, not zoom-dependent screen pixels.
+          sizePt: displayPx / scale,
+          displayPx,
           family,
-          fontName: it.fontName
+          fontName: it.fontName,
+          rawFamily: style.fontFamily || family
         }
       })
       setTextRuns(runs)
@@ -140,7 +156,9 @@ export default function App() {
     return () => { cancelled = true }
   }, [pdf, page, scale])
 
-  useEffect(()=>setSelectedId(null),[page, tool])
+  // Keep the selected text object while entering Match Font mode.
+  // Clearing selection on every tool change made Match Font lose its target.
+  useEffect(()=>setSelectedId(null),[page])
 
   const pagePos = e => {
     const r = stageRef.current.getBoundingClientRect()
@@ -155,13 +173,24 @@ export default function App() {
     if (tool === 'matchfont') {
       if (!selected || selected.kind !== 'text') { setStatus('Select an added text box first, then choose Match PDF text.'); setTool('select'); return }
       if (!textRuns.length) { setStatus('No selectable text was detected on this page. It may be a scanned image.'); setTool('select'); return }
-      const nearest = [...textRuns].sort((a,b) => {
+      // Prefer a text run whose bounding box contains the click. If none does, use the nearest run.
+      const padX=.008, padY=.01
+      const hit = textRuns
+        .filter(r => p.x >= r.x-padX && p.x <= r.x+r.w+padX && p.y >= r.y-padY && p.y <= r.y+r.h+padY)
+        .sort((a,b) => (a.w*a.h)-(b.w*b.h))[0]
+      const nearest = hit || [...textRuns].sort((a,b) => {
         const da = Math.hypot((a.x+a.w/2)-p.x,(a.y+a.h/2)-p.y)
         const db = Math.hypot((b.x+b.w/2)-p.x,(b.y+b.h/2)-p.y)
         return da-db
       })[0]
-      updateObject(selected.id,{font:`pdf:${nearest.family}`,pdfFontFamily:nearest.family,size:Math.max(8,Math.round(nearest.size))})
-      setStatus(`Matched nearby PDF text: ${nearest.family}, about ${Math.round(nearest.size)} px. For exact exported typography, upload the matching TTF/OTF font file.`)
+      const matchedSize = Math.max(6, Math.round((nearest.sizePt || 12) * 10) / 10)
+      updateObject(selected.id,{
+        font:`pdf:${nearest.family}`,
+        pdfFontFamily:nearest.family,
+        pdfFontName:nearest.fontName,
+        size:matchedSize
+      })
+      setStatus(`Matched “${nearest.text.slice(0,40)}” → ${nearest.family}, ~${matchedSize} pt. If the PDF uses an embedded/subset font, upload the matching TTF/OTF for exact export.`)
       setTool('select')
       return
     }
@@ -251,7 +280,7 @@ export default function App() {
             const customId = (n.font||'').startsWith('custom:') ? n.font.split(':')[1] : null
             const base = fallbackBase(n.font)
             const font = customId && embeddedCustom[customId] ? embeddedCustom[customId] : n.bold ? boldMap[base] : n.italic ? italicMap[base] : fontMap[base]
-            const size=(n.size||18)/1.25
+            const size=(n.size||18)
             p.drawText(n.text||'',{x:n.x*width,y:height-(n.y*height)-size,size,font,color:rgb(r,g,b),opacity:n.opacity??1,maxWidth:n.w*width})
             if(n.underline) p.drawLine({start:{x:n.x*width,y:height-(n.y*height)-size*1.15},end:{x:(n.x+n.w)*width,y:height-(n.y*height)-size*1.15},thickness:1,color:rgb(r,g,b),opacity:n.opacity??1})
           }
@@ -369,7 +398,7 @@ export default function App() {
 
   return <div className="app">
     <header>
-      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v3 • local-first</span></div></div>
+      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v3.1 • local-first</span></div></div>
       <div className="status">{busy?'Working…':status}</div>
       <label className="primary"><Upload size={17}/> Open PDF<input hidden type="file" accept="application/pdf" onChange={onFile}/></label>
     </header>
@@ -408,7 +437,7 @@ export default function App() {
           {detectedFonts.length>0 && <optgroup label="Detected in this PDF">{detectedFonts.map(f=><option key={`pdf:${f}`} value={`pdf:${f}`}>PDF: {f}</option>)}</optgroup>}
           {Object.entries(customFonts).length>0 && <optgroup label="Uploaded fonts">{Object.entries(customFonts).map(([id,f])=><option key={id} value={`custom:${id}`}>{f.family}</option>)}</optgroup>}
         </select>
-        <button onClick={()=>{setTool('matchfont');setStatus('Match font mode: click existing PDF text to copy its detected font family and size.')}}><Pipette/>Match PDF text</button>
+        <button onClick={()=>{setTool('matchfont');setStatus('Match font mode: click directly on the existing PDF text whose font and size you want to copy.')}}><Pipette/>Match PDF text</button>
         <label className="font-upload"><FileUp/>Upload font<input hidden type="file" accept=".ttf,.otf,font/ttf,font/otf" onChange={uploadFont}/></label>
         <label>Size <input type="number" min="8" max="96" value={selected.size} onChange={e=>updateObject(selected.id,{size:Number(e.target.value)})}/></label>
         <button className={selected.bold?'active':''} onClick={()=>updateObject(selected.id,{bold:!selected.bold,italic:false})}><Bold/></button>
@@ -430,7 +459,7 @@ export default function App() {
               if(obj.kind==='stroke') return <svg key={obj.id} className="stroke-svg" onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}}><polyline points={obj.points.map(p=>`${p.x*viewportSize.width},${p.y*viewportSize.height}`).join(' ')} fill="none" stroke={obj.color} strokeWidth={obj.width} strokeLinecap="round"/></svg>
               const style={left:`${obj.x*100}%`,top:`${obj.y*100}%`,width:`${obj.w*100}%`,height:`${obj.h*100}%`,opacity:obj.opacity??1}
               return <div key={obj.id} className={`edit-object ${obj.kind} ${selectedId===obj.id?'selected':''}`} style={style} onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}}>
-                {obj.kind==='text' && <textarea spellCheck="false" value={obj.text} onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}} onChange={e=>updateObject(obj.id,{text:e.target.value},false)} style={{fontFamily:fontCss(obj.font),fontSize:`${obj.size}px`,fontWeight:obj.bold?'700':'400',fontStyle:obj.italic?'italic':'normal',textDecoration:obj.underline?'underline':'none',color:obj.color}}/>}
+                {obj.kind==='text' && <textarea spellCheck="false" value={obj.text} onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}} onChange={e=>updateObject(obj.id,{text:e.target.value},false)} style={{fontFamily:fontCss(obj.font),fontSize:`${(obj.size||18)*scale}px`,fontWeight:obj.bold?'700':'400',fontStyle:obj.italic?'italic':'normal',textDecoration:obj.underline?'underline':'none',color:obj.color}}/>}
                 {obj.kind==='signature' && <img src={obj.dataUrl} alt="signature" draggable="false"/>}
                 {obj.kind==='highlight' && <div className="fill" style={{background:obj.color,opacity:obj.opacity}}/>}
                 {obj.kind==='whiteout' && <div className="fill white"/>}

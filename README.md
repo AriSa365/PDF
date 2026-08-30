@@ -49,3 +49,14 @@ The Vite base is relative (`./`), so the build works from a repository subpath s
 
 ### Font matching limitation
 PDF.js can usually identify a PDF's internal font/fallback family and text size, but browsers cannot always extract and legally/reliably reuse an embedded PDF font file. For exact exported typography, use **Upload font** with the matching TTF/OTF font that you already have. Without an uploaded font, detected/non-standard fonts are previewed with the closest browser font and exported with a standard PDF fallback.
+
+## v3.1 Match Font fix
+
+- Keeps the selected added-text object active while Match PDF text mode is enabled.
+- Uses PDF.js text style metadata plus font objects when available.
+- Cleans subset font prefixes (for example `ABCDEF+ArialMT`).
+- Prefers the exact clicked text run before falling back to nearest text.
+- Matches font size independent of the current zoom level.
+- Added text now scales visually with PDF zoom, and its point size is used consistently when exporting.
+
+For PDFs with embedded/subset fonts, detected family names may still be approximations in the browser. Upload the corresponding TTF/OTF file when exact exported typography is required.
