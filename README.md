@@ -60,3 +60,8 @@ PDF.js can usually identify a PDF's internal font/fallback family and text size,
 - Added text now scales visually with PDF zoom, and its point size is used consistently when exporting.
 
 For PDFs with embedded/subset fonts, detected family names may still be approximations in the browser. Upload the corresponding TTF/OTF file when exact exported typography is required.
+
+## v3.3 conversion tools
+- PDF → Word (.docx): extracts the PDF text into editable Word paragraphs. Complex columns/tables may require cleanup; scanned PDFs require OCR (planned).
+- PDF → PowerPoint (.pptx): creates one slide per PDF page and preserves the page appearance as a slide image.
+- Conversion runs locally in the browser; no server upload is required.

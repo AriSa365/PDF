@@ -1,7 +1,7 @@
 {
   "name": "pdf-workbench",
   "private": true,
-  "version": "3.1.0",
+  "version": "3.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,9 @@
     "react": "latest",
     "react-dom": "latest",
     "vite": "latest",
-    "@pdf-lib/fontkit": "latest"
+    "@pdf-lib/fontkit": "latest",
+    "docx": "latest",
+    "pptxgenjs": "latest"
   },
   "devDependencies": {}
 }
