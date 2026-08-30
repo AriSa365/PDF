@@ -55,6 +55,12 @@ export default function App() {
   const [future, setFuture] = useState([])
   const [textRuns, setTextRuns] = useState([])
   const [customFonts, setCustomFonts] = useState({})
+  const highlightPresets = ['#facc15','#86efac','#7dd3fc','#f9a8d4','#fdba74','#c4b5fd','#fca5a5','#d1d5db']
+  const [highlightColor, setHighlightColor] = useState(()=>localStorage.getItem('pdf-workbench-highlight-color') || '#facc15')
+  const [highlightOpacity, setHighlightOpacity] = useState(()=>Number(localStorage.getItem('pdf-workbench-highlight-opacity') || .35))
+
+  useEffect(()=>{ localStorage.setItem('pdf-workbench-highlight-color', highlightColor) },[highlightColor])
+  useEffect(()=>{ localStorage.setItem('pdf-workbench-highlight-opacity', String(highlightOpacity)) },[highlightOpacity])
 
   const currentObjects = objects[page] || []
   const selected = useMemo(() => currentObjects.find(o=>o.id===selectedId) || null, [currentObjects, selectedId])
@@ -213,7 +219,7 @@ export default function App() {
     const cur = drawRef.current; if(!cur) return
     const p = pagePos(e); let obj=null
     if(tool==='draw') obj={id:uid(),kind:'stroke',points:[...cur.points,p],color:'#e11d48',width:3}
-    if(tool==='highlight') obj={id:uid(),kind:'highlight',x:Math.min(cur.start.x,p.x),y:Math.min(cur.start.y,p.y),w:Math.abs(p.x-cur.start.x),h:Math.abs(p.y-cur.start.y),color:'#facc15',opacity:.35}
+    if(tool==='highlight') obj={id:uid(),kind:'highlight',x:Math.min(cur.start.x,p.x),y:Math.min(cur.start.y,p.y),w:Math.abs(p.x-cur.start.x),h:Math.abs(p.y-cur.start.y),color:highlightColor,opacity:highlightOpacity}
     if(tool==='whiteout') obj={id:uid(),kind:'whiteout',x:Math.min(cur.start.x,p.x),y:Math.min(cur.start.y,p.y),w:Math.abs(p.x-cur.start.x),h:Math.abs(p.y-cur.start.y)}
     setObjects(prev=>({...prev,[page]:(prev[page]||[]).filter(o=>o.id!=='__preview')}))
     if(obj) pushObjects(prev=>({...prev,[page]:[...(prev[page]||[]).filter(o=>o.id!=='__preview'),obj]}))
@@ -398,7 +404,7 @@ export default function App() {
 
   return <div className="app">
     <header>
-      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v3.1 • local-first</span></div></div>
+      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v3.2 • local-first</span></div></div>
       <div className="status">{busy?'Working…':status}</div>
       <label className="primary"><Upload size={17}/> Open PDF<input hidden type="file" accept="application/pdf" onChange={onFile}/></label>
     </header>
@@ -446,6 +452,12 @@ export default function App() {
         <input type="color" value={selected.color} onChange={e=>updateObject(selected.id,{color:e.target.value})} title="Text color"/>
         <label>Opacity <input type="range" min="0.1" max="1" step="0.1" value={selected.opacity} onChange={e=>updateObject(selected.id,{opacity:Number(e.target.value)})}/></label>
         <button onClick={duplicateSelected}><Copy/>Duplicate</button><button className="danger" onClick={removeSelected}><Trash2/>Delete</button>
+      </div>}
+      {(tool==='highlight' || selected?.kind==='highlight') && <div className="properties highlight-properties">
+        <span className="selected-label"><Highlighter/>Highlight</span>
+        <div className="swatches">{highlightPresets.map(c=><button key={c} className={`swatch ${((selected?.kind==='highlight'?selected.color:highlightColor)===c)?'chosen':''}`} style={{background:c}} title={c} onClick={()=>{setHighlightColor(c); if(selected?.kind==='highlight') updateObject(selected.id,{color:c})}} />)}</div>
+        <label className="custom-color">Custom <input type="color" value={selected?.kind==='highlight'?(selected.color||highlightColor):highlightColor} onChange={e=>{setHighlightColor(e.target.value); if(selected?.kind==='highlight') updateObject(selected.id,{color:e.target.value})}}/></label>
+        <label className="opacity-control">Opacity <input type="range" min="0.1" max="0.8" step="0.05" value={selected?.kind==='highlight'?(selected.opacity??highlightOpacity):highlightOpacity} onChange={e=>{const v=Number(e.target.value);setHighlightOpacity(v);if(selected?.kind==='highlight')updateObject(selected.id,{opacity:v},false)}}/><span>{Math.round((selected?.kind==='highlight'?(selected.opacity??highlightOpacity):highlightOpacity)*100)}%</span></label>
       </div>}
       {selected && selected.kind!=='text' && <div className="properties"><span className="selected-label"><Move/>Selected {selected.kind}</span><button onClick={duplicateSelected}><Copy/>Duplicate</button><button className="danger" onClick={removeSelected}><Trash2/>Delete</button></div>}
 
