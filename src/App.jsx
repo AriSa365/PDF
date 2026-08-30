@@ -4,11 +4,12 @@ import { PDFDocument, degrees, rgb, StandardFonts } from 'pdf-lib'
 import fontkit from '@pdf-lib/fontkit'
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx'
 import pptxgen from 'pptxgenjs'
+import { extractDocumentLayout, refineWithOllama } from './conversionAgent.js'
 import {
   Upload, Download, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, RotateCw,
   Files, FileOutput, Type, Highlighter, PenLine, Search, Home, ImagePlus,
   Trash2, Plus, MousePointer2, Undo2, Redo2, Signature, Square, X, Copy,
-  Bold, Italic, Underline, AlignLeft, Save, Move, Maximize2, Pipette, FileUp, FileText, Presentation
+  Bold, Italic, Underline, AlignLeft, Save, Move, Maximize2, Pipette, FileUp, FileText, Presentation, Sparkles
 } from 'lucide-react'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
@@ -331,39 +332,63 @@ export default function App() {
     setBusy(true)
     try{const out=await PDFDocument.create();for(const f of fs){const data=new Uint8Array(await f.arrayBuffer());let img=f.type==='image/png'?await out.embedPng(data):await out.embedJpg(data);const dims=img.scale(1),maxW=595,maxH=842,ratio=Math.min(maxW/dims.width,maxH/dims.height,1);const p=out.addPage([maxW,maxH]);const w=dims.width*ratio,h=dims.height*ratio;p.drawImage(img,{x:(maxW-w)/2,y:(maxH-h)/2,width:w,height:h})}downloadBytes(await out.save(),'images.pdf');setStatus(`Converted ${fs.length} image${fs.length>1?'s':''} to PDF.`)}catch(err){setStatus(`Image conversion failed: ${err.message}`)}finally{setBusy(false);e.target.value=''}
   }
+  const [convertMode, setConvertMode] = useState('smart')
+  const [ollamaModel, setOllamaModel] = useState('qwen2.5:7b')
+
+  const buildStructuredLayout = async () => {
+    let layout = await extractDocumentLayout(pdf, msg=>setStatus(msg))
+    if (convertMode === 'ai') {
+      setStatus(`Running local AI reconstruction agent (${ollamaModel})…`)
+      layout = await refineWithOllama(layout, {model:ollamaModel}, msg=>setStatus(msg))
+    }
+    return layout
+  }
+
   const pdfToWord = async () => {
     if(!pdf) return
-    setBusy(true); setStatus('Converting PDF to editable Word…')
+    setBusy(true); setStatus('Separating PDF text and reconstructing editable Word content…')
     try {
+      const layout=await buildStructuredLayout()
       const children=[]
-      for(let i=1;i<=pdf.numPages;i++){
-        const p=await pdf.getPage(i), tc=await p.getTextContent()
-        const items=tc.items.filter(x=>x.str?.trim()).map(x=>({str:x.str,x:x.transform?.[4]||0,y:x.transform?.[5]||0,h:Math.abs(x.transform?.[3]||11)})).sort((a,b)=>Math.abs(b.y-a.y)>4?b.y-a.y:a.x-b.x)
-        let line=[], lastY=null
-        const flush=()=>{if(!line.length)return; children.push(new Paragraph({children:[new TextRun({text:line.map(x=>x.str).join(' '),size:Math.max(16,Math.min(40,Math.round((line.reduce((a,x)=>a+x.h,0)/line.length)*2)))})]}));line=[]}
-        for(const it of items){if(lastY!==null && Math.abs(it.y-lastY)>5) flush();line.push(it);lastY=it.y} flush()
-        if(i<pdf.numPages) children.push(new Paragraph({pageBreakBefore:true,children:[new TextRun('')]}))
+      for(const pg of layout.pages){
+        for(const b of pg.blocks){
+          if(b.kind==='footer') continue
+          const heading = b.kind==='title' ? HeadingLevel.TITLE : b.kind==='heading' ? HeadingLevel.HEADING_1 : undefined
+          const bullet = b.kind==='list' ? {level:0} : undefined
+          children.push(new Paragraph({
+            heading,
+            bullet,
+            spacing:{after: b.kind==='title'?180:b.kind==='heading'?120:80},
+            children:[new TextRun({text:b.text,bold:b.bold,italics:b.italic,font:b.family||'Arial',size:Math.max(16,Math.min(56,Math.round((b.sizePt||11)*2)))})]
+          }))
+        }
+        if(pg.pageNumber<layout.pages.length) children.push(new Paragraph({pageBreakBefore:true,children:[new TextRun('')]}))
       }
       const doc=new Document({sections:[{children}]})
       const blob=await Packer.toBlob(doc), url=URL.createObjectURL(blob), a=document.createElement('a')
-      a.href=url;a.download=`${(file?.name||'document').replace(/\.pdf$/i,'')}.docx`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
-      setStatus('Word file created. Text is editable; complex PDF layouts may need cleanup.')
+      a.href=url;a.download=`${(file?.name||'document').replace(/\.pdf$/i,'')}-editable.docx`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
+      setStatus(`Editable Word created from reconstructed text${convertMode==='ai'?' with local AI refinement':''}. No page screenshots were pasted.`)
     }catch(err){setStatus(`Word conversion failed: ${err.message}`)}finally{setBusy(false)}
   }
 
   const pdfToPowerPoint = async () => {
     if(!pdf) return
-    setBusy(true); setStatus('Converting PDF pages to PowerPoint slides…')
+    setBusy(true); setStatus('Separating PDF text into editable PowerPoint objects…')
     try{
-      const pptx=new pptxgen(); pptx.layout='LAYOUT_WIDE'; pptx.author='PDF Workbench'; pptx.subject='Converted from PDF'
-      for(let i=1;i<=pdf.numPages;i++){
-        const p=await pdf.getPage(i), vp=p.getViewport({scale:2}), c=document.createElement('canvas'), ctx=c.getContext('2d')
-        c.width=Math.ceil(vp.width);c.height=Math.ceil(vp.height);await p.render({canvasContext:ctx,viewport:vp}).promise
-        const data=c.toDataURL('image/png'), slide=pptx.addSlide(), sw=13.333, sh=7.5, ratio=Math.min(sw/c.width,sh/c.height), w=c.width*ratio,h=c.height*ratio
-        slide.addImage({data,x:(sw-w)/2,y:(sh-h)/2,w,h})
+      const layout=await buildStructuredLayout()
+      const pptx=new pptxgen(); pptx.layout='LAYOUT_WIDE'; pptx.author='PDF Workbench'; pptx.subject='Editable reconstruction from PDF'
+      const sw=13.333, sh=7.5
+      for(const pg of layout.pages){
+        const slide=pptx.addSlide()
+        // Each reconstructed line becomes an independent, editable PowerPoint text box.
+        for(const line of pg.lineModels){
+          const x=Math.max(0,line.nx*sw), y=Math.max(0,line.ny*sh)
+          const w=Math.max(.08,Math.min(sw-x,line.nw*sw+.08)), h=Math.max(.16,Math.min(sh-y,line.nh*sh*1.35+.06))
+          slide.addText(line.text,{x,y,w,h,fontFace:line.family||'Arial',fontSize:Math.max(5,Math.min(44,line.sizePt||11)),bold:!!line.bold,italic:!!line.italic,margin:0,breakLine:false,fit:'shrink',valign:'mid',color:'111111',transparency:0})
+        }
       }
-      await pptx.writeFile({fileName:`${(file?.name||'document').replace(/\.pdf$/i,'')}.pptx`})
-      setStatus('PowerPoint created: one layout-preserving PDF page per slide.')
+      await pptx.writeFile({fileName:`${(file?.name||'document').replace(/\.pdf$/i,'')}-editable.pptx`})
+      setStatus(`Editable PowerPoint created: PDF text is now separate PowerPoint text boxes${convertMode==='ai'?' with local AI structural refinement':''}. Graphics are not flattened behind the text.`)
     }catch(err){setStatus(`PowerPoint conversion failed: ${err.message}`)}finally{setBusy(false)}
   }
 
@@ -464,9 +489,15 @@ export default function App() {
       <div className="section">PDF TOOLS</div>
       <label className="side-label"><Files/>Merge PDFs<input hidden multiple type="file" accept="application/pdf" onChange={mergeFiles}/></label>
       <label className="side-label"><ImagePlus/>Images → PDF<input hidden multiple type="file" accept="image/png,image/jpeg" onChange={imageToPdf}/></label>
-      <div className="section">CONVERT</div>
-      <button onClick={pdfToWord} disabled={!pdf}><FileText/>PDF → Word</button>
-      <button onClick={pdfToPowerPoint} disabled={!pdf}><Presentation/>PDF → PowerPoint</button>
+      <div className="section">SMART CONVERT</div>
+      <div className="convert-agent-card">
+        <div className="agent-title"><Sparkles/>Reconstruction agent</div>
+        <label><input type="radio" checked={convertMode==='smart'} onChange={()=>setConvertMode('smart')}/> Smart local</label>
+        <label><input type="radio" checked={convertMode==='ai'} onChange={()=>setConvertMode('ai')}/> Local AI (Ollama)</label>
+        {convertMode==='ai' && <input className="agent-model" value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)} placeholder="Ollama model"/>}
+      </div>
+      <button onClick={pdfToWord} disabled={!pdf||busy}><FileText/>Editable Word</button>
+      <button onClick={pdfToPowerPoint} disabled={!pdf||busy}><Presentation/>Editable PowerPoint</button>
     </aside>
 
     <main>

@@ -10,3 +10,5 @@
 .custom-color input[type=color]{width:31px;height:27px;border:0;padding:0;background:transparent;cursor:pointer}
 .opacity-control input[type=range]{width:110px}
 .opacity-control span{min-width:34px;font-variant-numeric:tabular-nums}
+
+.convert-agent-card{margin:6px 10px 10px;padding:10px;border:1px solid #dbe3ee;border-radius:10px;background:#f8fafc;display:flex;flex-direction:column;gap:7px;font-size:12px}.convert-agent-card .agent-title{display:flex;align-items:center;gap:6px;font-weight:700;color:#172033}.convert-agent-card .agent-title svg{width:15px;height:15px}.convert-agent-card label{display:flex;align-items:center;gap:6px}.convert-agent-card .agent-model{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:6px 7px;font-size:12px}
