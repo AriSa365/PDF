@@ -1,13 +1,22 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import { PDFDocument, degrees, rgb, StandardFonts } from 'pdf-lib'
 import {
   Upload, Download, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, RotateCw,
-  Files, Scissors, FileOutput, Type, Highlighter, PenLine, Eraser, Search,
-  Home, Wrench, Save, ImagePlus, Trash2, Plus, X
+  Files, FileOutput, Type, Highlighter, PenLine, Search, Home, ImagePlus,
+  Trash2, Plus, MousePointer2, Undo2, Redo2, Signature, Square, X, Copy,
+  Bold, Italic, Underline, AlignLeft, Save, Move, Maximize2
 } from 'lucide-react'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
+
+const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
+const clamp = (n, min, max) => Math.min(max, Math.max(min, n))
+const hexToRgb = hex => {
+  const clean = hex.replace('#','')
+  const n = parseInt(clean.length === 3 ? clean.split('').map(c=>c+c).join('') : clean, 16)
+  return { r: ((n>>16)&255)/255, g: ((n>>8)&255)/255, b:(n&255)/255 }
+}
 
 const downloadBytes = (bytes, name, type='application/pdf') => {
   const blob = new Blob([bytes], { type })
@@ -17,27 +26,67 @@ const downloadBytes = (bytes, name, type='application/pdf') => {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+const dataUrlToBytes = async dataUrl => new Uint8Array(await (await fetch(dataUrl)).arrayBuffer())
+
 export default function App() {
   const canvasRef = useRef(null)
-  const overlayRef = useRef(null)
+  const stageRef = useRef(null)
+  const signatureCanvasRef = useRef(null)
+  const signatureDrawRef = useRef(null)
+
   const [file, setFile] = useState(null)
   const [bytes, setBytes] = useState(null)
   const [pdf, setPdf] = useState(null)
   const [page, setPage] = useState(1)
   const [scale, setScale] = useState(1.25)
+  const [viewportSize, setViewportSize] = useState({width:0,height:0})
   const [tool, setTool] = useState('select')
-  const [notes, setNotes] = useState({})
+  const [objects, setObjects] = useState({})
+  const [selectedId, setSelectedId] = useState(null)
   const [query, setQuery] = useState('')
-  const [matches, setMatches] = useState([])
   const [status, setStatus] = useState('Open a PDF to begin. Your file stays in your browser.')
   const [busy, setBusy] = useState(false)
+  const [signatureOpen, setSignatureOpen] = useState(false)
+  const [signatureTab, setSignatureTab] = useState('draw')
+  const [typedSignature, setTypedSignature] = useState('')
+  const [savedSignature, setSavedSignature] = useState(()=>localStorage.getItem('pdf-workbench-signature') || '')
+  const [history, setHistory] = useState([])
+  const [future, setFuture] = useState([])
+
+  const currentObjects = objects[page] || []
+  const selected = useMemo(() => currentObjects.find(o=>o.id===selectedId) || null, [currentObjects, selectedId])
+
+  const pushObjects = updater => {
+    setObjects(prev => {
+      const before = JSON.stringify(prev)
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      setHistory(h => [...h.slice(-29), before])
+      setFuture([])
+      return next
+    })
+  }
+
+  const undo = () => {
+    if (!history.length) return
+    const prev = history[history.length-1]
+    setFuture(f => [JSON.stringify(objects), ...f].slice(0,30))
+    setHistory(h => h.slice(0,-1))
+    setObjects(JSON.parse(prev)); setSelectedId(null)
+  }
+  const redo = () => {
+    if (!future.length) return
+    const next = future[0]
+    setHistory(h => [...h, JSON.stringify(objects)].slice(-30))
+    setFuture(f => f.slice(1))
+    setObjects(JSON.parse(next)); setSelectedId(null)
+  }
 
   const openBytes = async (arr, name='document.pdf') => {
     setBusy(true)
     try {
       const copy = arr instanceof Uint8Array ? arr.slice() : new Uint8Array(arr)
       const doc = await pdfjsLib.getDocument({ data: copy.slice() }).promise
-      setBytes(copy); setPdf(doc); setPage(1); setNotes({})
+      setBytes(copy); setPdf(doc); setPage(1); setObjects({}); setSelectedId(null); setHistory([]); setFuture([])
       setFile({ name })
       setStatus(`${name} • ${doc.numPages} page${doc.numPages === 1 ? '' : 's'}`)
     } catch (e) { setStatus(`Could not open PDF: ${e.message}`) }
@@ -59,75 +108,115 @@ export default function App() {
       const viewport = p.getViewport({ scale })
       if (cancelled) return
       const canvas = canvasRef.current
-      const overlay = overlayRef.current
       canvas.width = viewport.width; canvas.height = viewport.height
       canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`
-      overlay.width = viewport.width; overlay.height = viewport.height
-      overlay.style.width = `${viewport.width}px`; overlay.style.height = `${viewport.height}px`
+      setViewportSize({width:viewport.width,height:viewport.height})
       await p.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
-      redrawOverlay()
     })()
     return () => { cancelled = true }
   }, [pdf, page, scale])
 
-  useEffect(() => { redrawOverlay() }, [notes, page])
+  useEffect(()=>setSelectedId(null),[page, tool])
 
-  const redrawOverlay = () => {
-    const c = overlayRef.current; if (!c) return
-    const ctx = c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height)
-    const list = notes[page] || []
-    for (const n of list) {
-      if (n.kind === 'stroke') {
-        ctx.lineWidth = n.width || 3; ctx.strokeStyle = n.color || '#e11d48'; ctx.lineCap='round'
-        ctx.beginPath(); n.points.forEach((pt,i)=> i?ctx.lineTo(pt.x,pt.y):ctx.moveTo(pt.x,pt.y)); ctx.stroke()
-      } else if (n.kind === 'highlight') {
-        ctx.fillStyle='rgba(250,204,21,.35)'; ctx.fillRect(n.x,n.y,n.w,n.h)
-      } else if (n.kind === 'text') {
-        ctx.font='18px sans-serif'; ctx.fillStyle='#111827'; ctx.fillText(n.text,n.x,n.y)
-      }
+  const pagePos = e => {
+    const r = stageRef.current.getBoundingClientRect()
+    return { x: clamp((e.clientX-r.left)/r.width,0,1), y: clamp((e.clientY-r.top)/r.height,0,1) }
+  }
+
+  const drawRef = useRef(null)
+  const onStageDown = e => {
+    if (!pdf || e.target.closest('.edit-object')) return
+    const p = pagePos(e)
+    if (tool === 'select') { setSelectedId(null); return }
+    if (tool === 'text') {
+      const obj = {id:uid(),kind:'text',x:p.x,y:p.y,w:.24,h:.055,text:'Double-click to edit',font:'Helvetica',size:18,bold:false,italic:false,underline:false,color:'#111827',opacity:1}
+      pushObjects(prev=>({...prev,[page]:[...(prev[page]||[]),obj]})); setSelectedId(obj.id); setTool('select'); return
     }
+    if (tool === 'signature') { setSignatureOpen(true); return }
+    drawRef.current = { start:p, points:[p] }
+    e.currentTarget.setPointerCapture?.(e.pointerId)
   }
 
-  const pointer = useRef(null)
-  const pos = e => { const r=overlayRef.current.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top} }
-  const down = e => {
-    if (!pdf || tool==='select') return
-    const p=pos(e); pointer.current={start:p, points:[p]}; overlayRef.current.setPointerCapture(e.pointerId)
+  const onStageMove = e => {
+    if (!drawRef.current || tool !== 'draw') return
+    drawRef.current.points.push(pagePos(e))
+    setObjects(prev=>({...prev,[page]:[...(prev[page]||[]).filter(o=>o.id!=='__preview'),{id:'__preview',kind:'stroke',points:[...drawRef.current.points],color:'#e11d48',width:3}]}))
   }
-  const move = e => {
-    if (!pointer.current || tool!=='draw') return
-    pointer.current.points.push(pos(e))
-    const temp={...notes,[page]:[...(notes[page]||[]),{kind:'stroke',points:pointer.current.points}]}
-    const old=notes; setNotes(temp); setTimeout(()=>setNotes(old),0)
+
+  const onStageUp = e => {
+    const cur = drawRef.current; if(!cur) return
+    const p = pagePos(e); let obj=null
+    if(tool==='draw') obj={id:uid(),kind:'stroke',points:[...cur.points,p],color:'#e11d48',width:3}
+    if(tool==='highlight') obj={id:uid(),kind:'highlight',x:Math.min(cur.start.x,p.x),y:Math.min(cur.start.y,p.y),w:Math.abs(p.x-cur.start.x),h:Math.abs(p.y-cur.start.y),color:'#facc15',opacity:.35}
+    if(tool==='whiteout') obj={id:uid(),kind:'whiteout',x:Math.min(cur.start.x,p.x),y:Math.min(cur.start.y,p.y),w:Math.abs(p.x-cur.start.x),h:Math.abs(p.y-cur.start.y)}
+    setObjects(prev=>({...prev,[page]:(prev[page]||[]).filter(o=>o.id!=='__preview')}))
+    if(obj) pushObjects(prev=>({...prev,[page]:[...(prev[page]||[]).filter(o=>o.id!=='__preview'),obj]}))
+    drawRef.current=null
   }
-  const up = e => {
-    const cur=pointer.current; if(!cur) return
-    const p=pos(e); let item=null
-    if(tool==='draw') item={kind:'stroke',points:[...cur.points,p]}
-    if(tool==='highlight') item={kind:'highlight',x:Math.min(cur.start.x,p.x),y:Math.min(cur.start.y,p.y),w:Math.abs(p.x-cur.start.x),h:Math.abs(p.y-cur.start.y)}
-    if(tool==='text') { const text=prompt('Text to add:'); if(text) item={kind:'text',x:p.x,y:p.y,text} }
-    if(item) setNotes(n=>({...n,[page]:[...(n[page]||[]),item]}))
-    pointer.current=null
+
+  const updateObject = (id, patch, record=true) => {
+    const fn = prev => ({...prev,[page]:(prev[page]||[]).map(o=>o.id===id?{...o,...patch}:o)})
+    if(record) pushObjects(fn); else setObjects(fn)
   }
+  const removeSelected = () => selectedId && pushObjects(prev=>({...prev,[page]:(prev[page]||[]).filter(o=>o.id!==selectedId)}))
+  const duplicateSelected = () => {
+    if(!selected) return
+    const obj={...selected,id:uid(),x:clamp((selected.x||0)+.025,0,.95),y:clamp((selected.y||0)+.025,0,.95)}
+    pushObjects(prev=>({...prev,[page]:[...(prev[page]||[]),obj]})); setSelectedId(obj.id)
+  }
+
+  useEffect(()=>{
+    const key=e=>{
+      if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo()}
+      if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){e.preventDefault();redo()}
+      if((e.key==='Delete'||e.key==='Backspace')&&selectedId&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)){e.preventDefault();removeSelected()}
+    }
+    window.addEventListener('keydown',key); return()=>window.removeEventListener('keydown',key)
+  },[selectedId,selected,history,future,objects])
 
   const saveAnnotated = async () => {
     if(!bytes) return
     setBusy(true)
     try {
       const doc=await PDFDocument.load(bytes)
-      const font=await doc.embedFont(StandardFonts.Helvetica)
-      for(const [pg,items] of Object.entries(notes)) {
+      const fontMap={
+        Helvetica: await doc.embedFont(StandardFonts.Helvetica),
+        Times: await doc.embedFont(StandardFonts.TimesRoman),
+        Courier: await doc.embedFont(StandardFonts.Courier)
+      }
+      const boldMap={
+        Helvetica: await doc.embedFont(StandardFonts.HelveticaBold),
+        Times: await doc.embedFont(StandardFonts.TimesRomanBold),
+        Courier: await doc.embedFont(StandardFonts.CourierBold)
+      }
+      const italicMap={
+        Helvetica: await doc.embedFont(StandardFonts.HelveticaOblique),
+        Times: await doc.embedFont(StandardFonts.TimesRomanItalic),
+        Courier: await doc.embedFont(StandardFonts.CourierOblique)
+      }
+      for(const [pg,items] of Object.entries(objects)) {
         const p=doc.getPage(Number(pg)-1), {width,height}=p.getSize()
-        const renderedW=overlayRef.current?.width || width
-        const sx=width/renderedW, sy=height/(overlayRef.current?.height || height)
         for(const n of items){
-          if(n.kind==='text') p.drawText(n.text,{x:n.x*sx,y:height-n.y*sy,size:14,font,color:rgb(.07,.09,.15)})
-          if(n.kind==='highlight') p.drawRectangle({x:n.x*sx,y:height-(n.y+n.h)*sy,width:n.w*sx,height:n.h*sy,color:rgb(1,.85,.1),opacity:.35})
-          if(n.kind==='stroke') for(let i=1;i<n.points.length;i++){const a=n.points[i-1],b=n.points[i];p.drawLine({start:{x:a.x*sx,y:height-a.y*sy},end:{x:b.x*sx,y:height-b.y*sy},thickness:2,color:rgb(.88,.08,.3)})}
+          if(n.id==='__preview') continue
+          if(n.kind==='text') {
+            const {r,g,b}=hexToRgb(n.color||'#111827')
+            const font = n.bold ? boldMap[n.font||'Helvetica'] : n.italic ? italicMap[n.font||'Helvetica'] : fontMap[n.font||'Helvetica']
+            const size=(n.size||18)/1.25
+            p.drawText(n.text||'',{x:n.x*width,y:height-(n.y*height)-size,size,font,color:rgb(r,g,b),opacity:n.opacity??1,maxWidth:n.w*width})
+            if(n.underline) p.drawLine({start:{x:n.x*width,y:height-(n.y*height)-size*1.15},end:{x:(n.x+n.w)*width,y:height-(n.y*height)-size*1.15},thickness:1,color:rgb(r,g,b),opacity:n.opacity??1})
+          }
+          if(n.kind==='highlight') {const {r,g,b}=hexToRgb(n.color||'#facc15');p.drawRectangle({x:n.x*width,y:height-(n.y+n.h)*height,width:n.w*width,height:n.h*height,color:rgb(r,g,b),opacity:n.opacity??.35})}
+          if(n.kind==='whiteout') p.drawRectangle({x:n.x*width,y:height-(n.y+n.h)*height,width:n.w*width,height:n.h*height,color:rgb(1,1,1),opacity:1})
+          if(n.kind==='stroke') for(let i=1;i<n.points.length;i++){const a=n.points[i-1],b=n.points[i],c=hexToRgb(n.color||'#e11d48');p.drawLine({start:{x:a.x*width,y:height-a.y*height},end:{x:b.x*width,y:height-b.y*height},thickness:(n.width||3)/1.25,color:rgb(c.r,c.g,c.b)})}
+          if(n.kind==='signature' && n.dataUrl){
+            const imgBytes=await dataUrlToBytes(n.dataUrl); let img
+            try{img=await doc.embedPng(imgBytes)}catch{img=await doc.embedJpg(imgBytes)}
+            p.drawImage(img,{x:n.x*width,y:height-(n.y+n.h)*height,width:n.w*width,height:n.h*height,opacity:n.opacity??1})
+          }
         }
       }
       downloadBytes(await doc.save(), `edited-${file?.name || 'document.pdf'}`)
-      setStatus('Saved an edited copy. Your original file was not changed.')
+      setStatus('Saved an edited copy. Whiteouts and replacement text are flattened into the export.')
     } catch(e){setStatus(`Save failed: ${e.message}`)} finally{setBusy(false)}
   }
 
@@ -136,59 +225,91 @@ export default function App() {
     const doc=await PDFDocument.load(bytes); const p=doc.getPage(page-1)
     p.setRotation(degrees((p.getRotation().angle+90)%360)); const out=await doc.save(); await openBytes(out,file.name)
   }
-
   const extractPage = async () => {
     if(!bytes)return
     const src=await PDFDocument.load(bytes), out=await PDFDocument.create(); const [p]=await out.copyPages(src,[page-1]); out.addPage(p)
     downloadBytes(await out.save(), `${file.name.replace(/\.pdf$/i,'')}-page-${page}.pdf`)
   }
-
   const deletePage = async () => {
     if(!bytes || pdf.numPages<=1)return
-    const doc=await PDFDocument.load(bytes); doc.removePage(page-1); const out=await doc.save(); await openBytes(out,file.name); setPage(Math.min(page,pdf.numPages-1))
+    const doc=await PDFDocument.load(bytes); doc.removePage(page-1); const out=await doc.save(); await openBytes(out,file.name)
   }
-
   const mergeFiles = async e => {
     const fs=[...e.target.files]; if(!fs.length)return
     setBusy(true)
-    try{
-      const out=await PDFDocument.create()
-      for(const f of fs){const src=await PDFDocument.load(await f.arrayBuffer()); const pages=await out.copyPages(src,src.getPageIndices()); pages.forEach(p=>out.addPage(p))}
-      downloadBytes(await out.save(),'merged.pdf'); setStatus(`Merged ${fs.length} PDF files.`)
-    }catch(err){setStatus(`Merge failed: ${err.message}`)}finally{setBusy(false);e.target.value=''}
+    try{const out=await PDFDocument.create();for(const f of fs){const src=await PDFDocument.load(await f.arrayBuffer());const pages=await out.copyPages(src,src.getPageIndices());pages.forEach(p=>out.addPage(p))}downloadBytes(await out.save(),'merged.pdf');setStatus(`Merged ${fs.length} PDF files.`)}catch(err){setStatus(`Merge failed: ${err.message}`)}finally{setBusy(false);e.target.value=''}
   }
-
   const imageToPdf = async e => {
     const fs=[...e.target.files]; if(!fs.length)return
     setBusy(true)
-    try{
-      const out=await PDFDocument.create()
-      for(const f of fs){const data=new Uint8Array(await f.arrayBuffer()); let img
-        if(f.type==='image/png') img=await out.embedPng(data); else img=await out.embedJpg(data)
-        const dims=img.scale(1); const maxW=595,maxH=842,ratio=Math.min(maxW/dims.width,maxH/dims.height,1)
-        const p=out.addPage([maxW,maxH]); const w=dims.width*ratio,h=dims.height*ratio; p.drawImage(img,{x:(maxW-w)/2,y:(maxH-h)/2,width:w,height:h})
-      }
-      downloadBytes(await out.save(),'images.pdf');setStatus(`Converted ${fs.length} image${fs.length>1?'s':''} to PDF.`)
-    }catch(err){setStatus(`Image conversion failed: ${err.message}`)}finally{setBusy(false);e.target.value=''}
+    try{const out=await PDFDocument.create();for(const f of fs){const data=new Uint8Array(await f.arrayBuffer());let img=f.type==='image/png'?await out.embedPng(data):await out.embedJpg(data);const dims=img.scale(1),maxW=595,maxH=842,ratio=Math.min(maxW/dims.width,maxH/dims.height,1);const p=out.addPage([maxW,maxH]);const w=dims.width*ratio,h=dims.height*ratio;p.drawImage(img,{x:(maxW-w)/2,y:(maxH-h)/2,width:w,height:h})}downloadBytes(await out.save(),'images.pdf');setStatus(`Converted ${fs.length} image${fs.length>1?'s':''} to PDF.`)}catch(err){setStatus(`Image conversion failed: ${err.message}`)}finally{setBusy(false);e.target.value=''}
   }
-
   const search = async () => {
     if(!pdf || !query.trim()) return
     setBusy(true); const found=[]
-    for(let i=1;i<=pdf.numPages;i++){const p=await pdf.getPage(i), tc=await p.getTextContent(); const text=tc.items.map(x=>x.str).join(' '); if(text.toLowerCase().includes(query.toLowerCase())) found.push(i)}
-    setMatches(found); setStatus(found.length?`Found “${query}” on page${found.length>1?'s':''} ${found.join(', ')}.`:`No matches for “${query}”.`); setBusy(false)
+    for(let i=1;i<=pdf.numPages;i++){const p=await pdf.getPage(i),tc=await p.getTextContent();const text=tc.items.map(x=>x.str).join(' ');if(text.toLowerCase().includes(query.toLowerCase())) found.push(i)}
+    setStatus(found.length?`Found “${query}” on page${found.length>1?'s':''} ${found.join(', ')}.`:`No matches for “${query}”.`);setBusy(false)
   }
 
+  const beginObjectDrag = (e,obj) => {
+    if(tool!=='select') return
+    e.stopPropagation(); setSelectedId(obj.id)
+    const startX=e.clientX,startY=e.clientY,baseX=obj.x,baseY=obj.y
+    const move=ev=>updateObject(obj.id,{x:clamp(baseX+(ev.clientX-startX)/viewportSize.width,0,1-obj.w),y:clamp(baseY+(ev.clientY-startY)/viewportSize.height,0,1-obj.h)},false)
+    const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);setHistory(h=>[...h.slice(-29),JSON.stringify(objects)]);setFuture([])}
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up)
+  }
+
+  const beginResize = (e,obj) => {
+    e.stopPropagation();e.preventDefault();setSelectedId(obj.id)
+    const sx=e.clientX,sy=e.clientY,bw=obj.w,bh=obj.h
+    const move=ev=>updateObject(obj.id,{w:clamp(bw+(ev.clientX-sx)/viewportSize.width,.04,1-obj.x),h:clamp(bh+(ev.clientY-sy)/viewportSize.height,.025,1-obj.y)},false)
+    const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);setHistory(h=>[...h.slice(-29),JSON.stringify(objects)]);setFuture([])}
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up)
+  }
+
+  const addSignatureData = dataUrl => {
+    if(!dataUrl) return
+    const obj={id:uid(),kind:'signature',dataUrl,x:.2,y:.2,w:.28,h:.10,opacity:1}
+    pushObjects(prev=>({...prev,[page]:[...(prev[page]||[]),obj]}));setSelectedId(obj.id);setTool('select');setSignatureOpen(false)
+  }
+
+  const clearSignatureCanvas = () => {
+    const c=signatureCanvasRef.current;if(!c)return;const ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height)
+  }
+  const signaturePointerDown=e=>{
+    const c=signatureCanvasRef.current,r=c.getBoundingClientRect(),ctx=c.getContext('2d');signatureDrawRef.current=true;ctx.strokeStyle='#111827';ctx.lineWidth=3;ctx.lineCap='round';ctx.beginPath();ctx.moveTo((e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height)
+  }
+  const signaturePointerMove=e=>{
+    if(!signatureDrawRef.current)return;const c=signatureCanvasRef.current,r=c.getBoundingClientRect(),ctx=c.getContext('2d');ctx.lineTo((e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height);ctx.stroke()
+  }
+  const signaturePointerUp=()=>signatureDrawRef.current=false
+  const useDrawnSignature=()=>{
+    const data=signatureCanvasRef.current?.toDataURL('image/png');if(data){localStorage.setItem('pdf-workbench-signature',data);setSavedSignature(data);addSignatureData(data)}
+  }
+  const useTypedSignature=()=>{
+    if(!typedSignature.trim())return
+    const c=document.createElement('canvas');c.width=900;c.height=240;const ctx=c.getContext('2d');ctx.font='italic 120px cursive';ctx.fillStyle='#111827';ctx.textBaseline='middle';ctx.fillText(typedSignature,30,120);const data=c.toDataURL('image/png');localStorage.setItem('pdf-workbench-signature',data);setSavedSignature(data);addSignatureData(data)
+  }
+  const uploadSignature=e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=()=>{const data=r.result;localStorage.setItem('pdf-workbench-signature',data);setSavedSignature(data);addSignatureData(data)};r.readAsDataURL(f);e.target.value=''}
+
   return <div className="app">
-    <header><div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Local-first • GitHub-ready</span></div></div><div className="status">{busy?'Working…':status}</div><label className="primary"><Upload size={17}/> Open PDF<input hidden type="file" accept="application/pdf" onChange={onFile}/></label></header>
+    <header>
+      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v2 • local-first</span></div></div>
+      <div className="status">{busy?'Working…':status}</div>
+      <label className="primary"><Upload size={17}/> Open PDF<input hidden type="file" accept="application/pdf" onChange={onFile}/></label>
+    </header>
+
     <aside>
       <button className="nav active"><Home/>Workspace</button>
-      <div className="section">ANNOTATE</div>
-      <button className={tool==='select'?'active':''} onClick={()=>setTool('select')}><Search/>Select / Read</button>
-      <button className={tool==='highlight'?'active':''} onClick={()=>setTool('highlight')}><Highlighter/>Highlight</button>
-      <button className={tool==='draw'?'active':''} onClick={()=>setTool('draw')}><PenLine/>Draw</button>
+      <div className="section">EDIT</div>
+      <button className={tool==='select'?'active':''} onClick={()=>setTool('select')}><MousePointer2/>Select / move</button>
       <button className={tool==='text'?'active':''} onClick={()=>setTool('text')}><Type/>Add text</button>
-      <button onClick={()=>setNotes(n=>({...n,[page]:[]}))}><Eraser/>Clear page marks</button>
+      <button className={tool==='whiteout'?'active':''} onClick={()=>setTool('whiteout')}><Square/>Whiteout / erase</button>
+      <button className={tool==='signature'?'active':''} onClick={()=>{setTool('signature');setSignatureOpen(true)}}><Signature/>Signature</button>
+      <div className="section">ANNOTATE</div>
+      <button className={tool==='highlight'?'active':''} onClick={()=>setTool('highlight')}><Highlighter/>Highlight area</button>
+      <button className={tool==='draw'?'active':''} onClick={()=>setTool('draw')}><PenLine/>Draw</button>
       <div className="section">PAGE TOOLS</div>
       <button onClick={rotatePage} disabled={!pdf}><RotateCw/>Rotate page</button>
       <button onClick={extractPage} disabled={!pdf}><FileOutput/>Extract page</button>
@@ -197,17 +318,57 @@ export default function App() {
       <label className="side-label"><Files/>Merge PDFs<input hidden multiple type="file" accept="application/pdf" onChange={mergeFiles}/></label>
       <label className="side-label"><ImagePlus/>Images → PDF<input hidden multiple type="file" accept="image/png,image/jpeg" onChange={imageToPdf}/></label>
     </aside>
+
     <main>
       <div className="toolbar">
+        <div className="group"><button onClick={undo} disabled={!history.length} title="Undo"><Undo2/></button><button onClick={redo} disabled={!future.length} title="Redo"><Redo2/></button></div>
         <div className="group"><button disabled={!pdf||page<=1} onClick={()=>setPage(p=>p-1)}><ChevronLeft/></button><span>{pdf?`${page} / ${pdf.numPages}`:'— / —'}</span><button disabled={!pdf||page>=pdf.numPages} onClick={()=>setPage(p=>p+1)}><ChevronRight/></button></div>
         <div className="group"><button onClick={()=>setScale(s=>Math.max(.5,s-.15))}><ZoomOut/></button><span>{Math.round(scale*100)}%</span><button onClick={()=>setScale(s=>Math.min(3,s+.15))}><ZoomIn/></button></div>
         <div className="search"><input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==='Enter'&&search()} placeholder="Search text…"/><button onClick={search}><Search/></button></div>
         <button className="save" disabled={!pdf} onClick={saveAnnotated}><Download/>Export edited PDF</button>
       </div>
+
+      {selected?.kind==='text' && <div className="properties">
+        <select value={selected.font} onChange={e=>updateObject(selected.id,{font:e.target.value})}><option>Helvetica</option><option>Times</option><option>Courier</option></select>
+        <label>Size <input type="number" min="8" max="96" value={selected.size} onChange={e=>updateObject(selected.id,{size:Number(e.target.value)})}/></label>
+        <button className={selected.bold?'active':''} onClick={()=>updateObject(selected.id,{bold:!selected.bold,italic:false})}><Bold/></button>
+        <button className={selected.italic?'active':''} onClick={()=>updateObject(selected.id,{italic:!selected.italic,bold:false})}><Italic/></button>
+        <button className={selected.underline?'active':''} onClick={()=>updateObject(selected.id,{underline:!selected.underline})}><Underline/></button>
+        <input type="color" value={selected.color} onChange={e=>updateObject(selected.id,{color:e.target.value})} title="Text color"/>
+        <label>Opacity <input type="range" min="0.1" max="1" step="0.1" value={selected.opacity} onChange={e=>updateObject(selected.id,{opacity:Number(e.target.value)})}/></label>
+        <button onClick={duplicateSelected}><Copy/>Duplicate</button><button className="danger" onClick={removeSelected}><Trash2/>Delete</button>
+      </div>}
+      {selected && selected.kind!=='text' && <div className="properties"><span className="selected-label"><Move/>Selected {selected.kind}</span><button onClick={duplicateSelected}><Copy/>Duplicate</button><button className="danger" onClick={removeSelected}><Trash2/>Delete</button></div>}
+
       <div className="stage">
-        {!pdf && <div className="empty"><div className="empty-icon"><Upload size={34}/></div><h1>Open a PDF</h1><p>Read, annotate, rotate, extract, merge and export PDFs entirely in your browser.</p><label className="primary big"><Plus/>Choose PDF<input hidden type="file" accept="application/pdf" onChange={onFile}/></label><div className="privacy">No server upload is required for the core tools.</div></div>}
-        {pdf && <div className="page-wrap"><canvas ref={canvasRef}/><canvas ref={overlayRef} className={`overlay tool-${tool}`} onPointerDown={down} onPointerMove={move} onPointerUp={up}/></div>}
+        {!pdf && <div className="empty"><div className="empty-icon"><Upload size={34}/></div><h1>Open a PDF</h1><p>Edit with movable text, signatures, whiteout, highlights and drawing. Everything runs locally in your browser.</p><label className="primary big"><Plus/>Choose PDF<input hidden type="file" accept="application/pdf" onChange={onFile}/></label><div className="privacy">No server upload is required for the core tools.</div></div>}
+        {pdf && <div className={`page-wrap tool-${tool}`} ref={stageRef} onPointerDown={onStageDown} onPointerMove={onStageMove} onPointerUp={onStageUp} style={{width:viewportSize.width,height:viewportSize.height}}>
+          <canvas ref={canvasRef}/>
+          <div className="object-layer">
+            {currentObjects.map(obj => {
+              if(obj.id==='__preview' && obj.kind==='stroke') return <svg key={obj.id} className="stroke-svg"><polyline points={obj.points.map(p=>`${p.x*viewportSize.width},${p.y*viewportSize.height}`).join(' ')} fill="none" stroke={obj.color} strokeWidth={obj.width} strokeLinecap="round"/></svg>
+              if(obj.kind==='stroke') return <svg key={obj.id} className="stroke-svg" onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}}><polyline points={obj.points.map(p=>`${p.x*viewportSize.width},${p.y*viewportSize.height}`).join(' ')} fill="none" stroke={obj.color} strokeWidth={obj.width} strokeLinecap="round"/></svg>
+              const style={left:`${obj.x*100}%`,top:`${obj.y*100}%`,width:`${obj.w*100}%`,height:`${obj.h*100}%`,opacity:obj.opacity??1}
+              return <div key={obj.id} className={`edit-object ${obj.kind} ${selectedId===obj.id?'selected':''}`} style={style} onPointerDown={e=>beginObjectDrag(e,obj)}>
+                {obj.kind==='text' && <textarea spellCheck="false" value={obj.text} onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}} onChange={e=>updateObject(obj.id,{text:e.target.value},false)} style={{fontFamily:obj.font==='Times'?'Times New Roman':obj.font==='Courier'?'Courier New':'Arial',fontSize:`${obj.size}px`,fontWeight:obj.bold?'700':'400',fontStyle:obj.italic?'italic':'normal',textDecoration:obj.underline?'underline':'none',color:obj.color}}/>}
+                {obj.kind==='signature' && <img src={obj.dataUrl} alt="signature" draggable="false"/>}
+                {obj.kind==='highlight' && <div className="fill" style={{background:obj.color,opacity:obj.opacity}}/>}
+                {obj.kind==='whiteout' && <div className="fill white"/>}
+                {selectedId===obj.id && <button className="resize-handle" onPointerDown={e=>beginResize(e,obj)} title="Resize"><Maximize2/></button>}
+              </div>
+            })}
+          </div>
+        </div>}
       </div>
     </main>
+
+    {signatureOpen && <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&setSignatureOpen(false)}><div className="modal">
+      <div className="modal-head"><div><h2>Add signature</h2><p>Draw, type, upload, or reuse your saved signature.</p></div><button onClick={()=>setSignatureOpen(false)}><X/></button></div>
+      <div className="tabs"><button className={signatureTab==='draw'?'active':''} onClick={()=>setSignatureTab('draw')}>Draw</button><button className={signatureTab==='type'?'active':''} onClick={()=>setSignatureTab('type')}>Type</button><button className={signatureTab==='upload'?'active':''} onClick={()=>setSignatureTab('upload')}>Upload</button>{savedSignature&&<button className={signatureTab==='saved'?'active':''} onClick={()=>setSignatureTab('saved')}>Saved</button>}</div>
+      {signatureTab==='draw' && <div><canvas ref={signatureCanvasRef} className="signature-pad" width="900" height="260" onPointerDown={signaturePointerDown} onPointerMove={signaturePointerMove} onPointerUp={signaturePointerUp} onPointerLeave={signaturePointerUp}/><div className="modal-actions"><button onClick={clearSignatureCanvas}>Clear</button><button className="primary" onClick={useDrawnSignature}>Use signature</button></div></div>}
+      {signatureTab==='type' && <div className="type-signature"><input autoFocus value={typedSignature} onChange={e=>setTypedSignature(e.target.value)} placeholder="Type your name"/><div className="signature-preview">{typedSignature||'Your signature'}</div><button className="primary" onClick={useTypedSignature}>Use signature</button></div>}
+      {signatureTab==='upload' && <label className="upload-box"><Upload/><b>Upload PNG or JPG signature</b><span>Transparent PNG works best.</span><input hidden type="file" accept="image/png,image/jpeg" onChange={uploadSignature}/></label>}
+      {signatureTab==='saved' && savedSignature && <div className="saved-signature"><img src={savedSignature}/><button className="primary" onClick={()=>addSignatureData(savedSignature)}>Use saved signature</button></div>}
+    </div></div>}
   </div>
 }
