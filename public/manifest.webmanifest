@@ -1,0 +1,9 @@
+{
+  "name": "PDF Workbench",
+  "short_name": "PDF Workbench",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f6f6f4",
+  "theme_color": "#171717",
+  "description": "Local-first PDF reader and editing toolbox."
+}
