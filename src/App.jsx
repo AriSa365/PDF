@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import { PDFDocument, degrees, rgb, StandardFonts } from 'pdf-lib'
+import fontkit from '@pdf-lib/fontkit'
 import {
   Upload, Download, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, RotateCw,
   Files, FileOutput, Type, Highlighter, PenLine, Search, Home, ImagePlus,
   Trash2, Plus, MousePointer2, Undo2, Redo2, Signature, Square, X, Copy,
-  Bold, Italic, Underline, AlignLeft, Save, Move, Maximize2
+  Bold, Italic, Underline, AlignLeft, Save, Move, Maximize2, Pipette, FileUp
 } from 'lucide-react'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
@@ -52,6 +53,8 @@ export default function App() {
   const [savedSignature, setSavedSignature] = useState(()=>localStorage.getItem('pdf-workbench-signature') || '')
   const [history, setHistory] = useState([])
   const [future, setFuture] = useState([])
+  const [textRuns, setTextRuns] = useState([])
+  const [customFonts, setCustomFonts] = useState({})
 
   const currentObjects = objects[page] || []
   const selected = useMemo(() => currentObjects.find(o=>o.id===selectedId) || null, [currentObjects, selectedId])
@@ -112,6 +115,27 @@ export default function App() {
       canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`
       setViewportSize({width:viewport.width,height:viewport.height})
       await p.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
+      const tc = await p.getTextContent()
+      const runs = tc.items.filter(it => it.str?.trim()).map(it => {
+        const tx = pdfjsLib.Util.transform(viewport.transform, it.transform)
+        const h = Math.max(6, Math.hypot(tx[2], tx[3]) || Math.hypot(tx[0], tx[1]))
+        let family = 'Helvetica'
+        try {
+          const fo = p.commonObjs.get(it.fontName)
+          family = fo?.fontFamily || fo?.fallbackName || fo?.name || family
+        } catch {}
+        return {
+          text: it.str,
+          x: tx[4] / viewport.width,
+          y: (tx[5] - h) / viewport.height,
+          w: Math.max(.005, (it.width * viewport.scale) / viewport.width),
+          h: h / viewport.height,
+          size: h,
+          family,
+          fontName: it.fontName
+        }
+      })
+      setTextRuns(runs)
     })()
     return () => { cancelled = true }
   }, [pdf, page, scale])
@@ -128,6 +152,19 @@ export default function App() {
     if (!pdf || e.target.closest('.edit-object')) return
     const p = pagePos(e)
     if (tool === 'select') { setSelectedId(null); return }
+    if (tool === 'matchfont') {
+      if (!selected || selected.kind !== 'text') { setStatus('Select an added text box first, then choose Match PDF text.'); setTool('select'); return }
+      if (!textRuns.length) { setStatus('No selectable text was detected on this page. It may be a scanned image.'); setTool('select'); return }
+      const nearest = [...textRuns].sort((a,b) => {
+        const da = Math.hypot((a.x+a.w/2)-p.x,(a.y+a.h/2)-p.y)
+        const db = Math.hypot((b.x+b.w/2)-p.x,(b.y+b.h/2)-p.y)
+        return da-db
+      })[0]
+      updateObject(selected.id,{font:`pdf:${nearest.family}`,pdfFontFamily:nearest.family,size:Math.max(8,Math.round(nearest.size))})
+      setStatus(`Matched nearby PDF text: ${nearest.family}, about ${Math.round(nearest.size)} px. For exact exported typography, upload the matching TTF/OTF font file.`)
+      setTool('select')
+      return
+    }
     if (tool === 'text') {
       const obj = {id:uid(),kind:'text',x:p.x,y:p.y,w:.24,h:.055,text:'Double-click to edit',font:'Helvetica',size:18,bold:false,italic:false,underline:false,color:'#111827',opacity:1}
       pushObjects(prev=>({...prev,[page]:[...(prev[page]||[]),obj]})); setSelectedId(obj.id); setTool('select'); return
@@ -179,6 +216,7 @@ export default function App() {
     setBusy(true)
     try {
       const doc=await PDFDocument.load(bytes)
+      doc.registerFontkit(fontkit)
       const fontMap={
         Helvetica: await doc.embedFont(StandardFonts.Helvetica),
         Times: await doc.embedFont(StandardFonts.TimesRoman),
@@ -194,13 +232,25 @@ export default function App() {
         Times: await doc.embedFont(StandardFonts.TimesRomanItalic),
         Courier: await doc.embedFont(StandardFonts.CourierOblique)
       }
+      const embeddedCustom = {}
+      for (const [id, cf] of Object.entries(customFonts)) {
+        try { embeddedCustom[id] = await doc.embedFont(cf.bytes, { subset: true }) } catch {}
+      }
+      const fallbackBase = value => {
+        const v=(value||'Helvetica').toLowerCase()
+        if(v.includes('courier')||v.includes('mono')) return 'Courier'
+        if(v.includes('times')||v.includes('georgia')||v.includes('garamond')||v.includes('palatino')||v.includes('bookman')||v.includes('serif')) return 'Times'
+        return 'Helvetica'
+      }
       for(const [pg,items] of Object.entries(objects)) {
         const p=doc.getPage(Number(pg)-1), {width,height}=p.getSize()
         for(const n of items){
           if(n.id==='__preview') continue
           if(n.kind==='text') {
             const {r,g,b}=hexToRgb(n.color||'#111827')
-            const font = n.bold ? boldMap[n.font||'Helvetica'] : n.italic ? italicMap[n.font||'Helvetica'] : fontMap[n.font||'Helvetica']
+            const customId = (n.font||'').startsWith('custom:') ? n.font.split(':')[1] : null
+            const base = fallbackBase(n.font)
+            const font = customId && embeddedCustom[customId] ? embeddedCustom[customId] : n.bold ? boldMap[base] : n.italic ? italicMap[base] : fontMap[base]
             const size=(n.size||18)/1.25
             p.drawText(n.text||'',{x:n.x*width,y:height-(n.y*height)-size,size,font,color:rgb(r,g,b),opacity:n.opacity??1,maxWidth:n.w*width})
             if(n.underline) p.drawLine({start:{x:n.x*width,y:height-(n.y*height)-size*1.15},end:{x:(n.x+n.w)*width,y:height-(n.y*height)-size*1.15},thickness:1,color:rgb(r,g,b),opacity:n.opacity??1})
@@ -253,18 +303,20 @@ export default function App() {
 
   const beginObjectDrag = (e,obj) => {
     if(tool!=='select') return
-    e.stopPropagation(); setSelectedId(obj.id)
+    e.stopPropagation(); e.preventDefault(); setSelectedId(obj.id)
+    const before=JSON.stringify(objects)
     const startX=e.clientX,startY=e.clientY,baseX=obj.x,baseY=obj.y
     const move=ev=>updateObject(obj.id,{x:clamp(baseX+(ev.clientX-startX)/viewportSize.width,0,1-obj.w),y:clamp(baseY+(ev.clientY-startY)/viewportSize.height,0,1-obj.h)},false)
-    const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);setHistory(h=>[...h.slice(-29),JSON.stringify(objects)]);setFuture([])}
+    const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);setHistory(h=>[...h.slice(-29),before]);setFuture([])}
     window.addEventListener('pointermove',move);window.addEventListener('pointerup',up)
   }
 
   const beginResize = (e,obj) => {
     e.stopPropagation();e.preventDefault();setSelectedId(obj.id)
+    const before=JSON.stringify(objects)
     const sx=e.clientX,sy=e.clientY,bw=obj.w,bh=obj.h
     const move=ev=>updateObject(obj.id,{w:clamp(bw+(ev.clientX-sx)/viewportSize.width,.04,1-obj.x),h:clamp(bh+(ev.clientY-sy)/viewportSize.height,.025,1-obj.y)},false)
-    const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);setHistory(h=>[...h.slice(-29),JSON.stringify(objects)]);setFuture([])}
+    const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);setHistory(h=>[...h.slice(-29),before]);setFuture([])}
     window.addEventListener('pointermove',move);window.addEventListener('pointerup',up)
   }
 
@@ -293,9 +345,31 @@ export default function App() {
   }
   const uploadSignature=e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=()=>{const data=r.result;localStorage.setItem('pdf-workbench-signature',data);setSavedSignature(data);addSignatureData(data)};r.readAsDataURL(f);e.target.value=''}
 
+  const fontCss = value => {
+    if((value||'').startsWith('custom:')) return customFonts[value.split(':')[1]]?.family || 'Arial'
+    if((value||'').startsWith('pdf:')) return value.slice(4)
+    const map={Helvetica:'Arial',Times:'Times New Roman',Courier:'Courier New'}
+    return map[value] || value || 'Arial'
+  }
+  const commonFonts=['Helvetica','Arial','Calibri','Verdana','Tahoma','Trebuchet MS','Century Gothic','Times','Times New Roman','Georgia','Garamond','Palatino Linotype','Bookman Old Style','Courier','Courier New']
+  const detectedFonts=[...new Set(textRuns.map(r=>r.family).filter(Boolean))]
+  const uploadFont=async e=>{
+    const f=e.target.files?.[0]; if(!f||!selected||selected.kind!=='text') return
+    try{
+      const arr=new Uint8Array(await f.arrayBuffer())
+      const id=uid(), family=f.name.replace(/\.(ttf|otf)$/i,'')
+      const url=URL.createObjectURL(new Blob([arr]))
+      const ff=new FontFace(family,`url(${url})`); await ff.load(); document.fonts.add(ff)
+      setCustomFonts(prev=>({...prev,[id]:{family,bytes:arr}}))
+      updateObject(selected.id,{font:`custom:${id}`})
+      setStatus(`Loaded ${family}. This font will be embedded into the exported PDF.`)
+    }catch(err){setStatus(`Could not load font: ${err.message}`)}
+    e.target.value=''
+  }
+
   return <div className="app">
     <header>
-      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v2 • local-first</span></div></div>
+      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v3 • local-first</span></div></div>
       <div className="status">{busy?'Working…':status}</div>
       <label className="primary"><Upload size={17}/> Open PDF<input hidden type="file" accept="application/pdf" onChange={onFile}/></label>
     </header>
@@ -329,7 +403,13 @@ export default function App() {
       </div>
 
       {selected?.kind==='text' && <div className="properties">
-        <select value={selected.font} onChange={e=>updateObject(selected.id,{font:e.target.value})}><option>Helvetica</option><option>Times</option><option>Courier</option></select>
+        <select value={selected.font} onChange={e=>updateObject(selected.id,{font:e.target.value})}>
+          <optgroup label="Common fonts">{commonFonts.map(f=><option key={f} value={f}>{f}</option>)}</optgroup>
+          {detectedFonts.length>0 && <optgroup label="Detected in this PDF">{detectedFonts.map(f=><option key={`pdf:${f}`} value={`pdf:${f}`}>PDF: {f}</option>)}</optgroup>}
+          {Object.entries(customFonts).length>0 && <optgroup label="Uploaded fonts">{Object.entries(customFonts).map(([id,f])=><option key={id} value={`custom:${id}`}>{f.family}</option>)}</optgroup>}
+        </select>
+        <button onClick={()=>{setTool('matchfont');setStatus('Match font mode: click existing PDF text to copy its detected font family and size.')}}><Pipette/>Match PDF text</button>
+        <label className="font-upload"><FileUp/>Upload font<input hidden type="file" accept=".ttf,.otf,font/ttf,font/otf" onChange={uploadFont}/></label>
         <label>Size <input type="number" min="8" max="96" value={selected.size} onChange={e=>updateObject(selected.id,{size:Number(e.target.value)})}/></label>
         <button className={selected.bold?'active':''} onClick={()=>updateObject(selected.id,{bold:!selected.bold,italic:false})}><Bold/></button>
         <button className={selected.italic?'active':''} onClick={()=>updateObject(selected.id,{italic:!selected.italic,bold:false})}><Italic/></button>
@@ -349,11 +429,12 @@ export default function App() {
               if(obj.id==='__preview' && obj.kind==='stroke') return <svg key={obj.id} className="stroke-svg"><polyline points={obj.points.map(p=>`${p.x*viewportSize.width},${p.y*viewportSize.height}`).join(' ')} fill="none" stroke={obj.color} strokeWidth={obj.width} strokeLinecap="round"/></svg>
               if(obj.kind==='stroke') return <svg key={obj.id} className="stroke-svg" onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}}><polyline points={obj.points.map(p=>`${p.x*viewportSize.width},${p.y*viewportSize.height}`).join(' ')} fill="none" stroke={obj.color} strokeWidth={obj.width} strokeLinecap="round"/></svg>
               const style={left:`${obj.x*100}%`,top:`${obj.y*100}%`,width:`${obj.w*100}%`,height:`${obj.h*100}%`,opacity:obj.opacity??1}
-              return <div key={obj.id} className={`edit-object ${obj.kind} ${selectedId===obj.id?'selected':''}`} style={style} onPointerDown={e=>beginObjectDrag(e,obj)}>
-                {obj.kind==='text' && <textarea spellCheck="false" value={obj.text} onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}} onChange={e=>updateObject(obj.id,{text:e.target.value},false)} style={{fontFamily:obj.font==='Times'?'Times New Roman':obj.font==='Courier'?'Courier New':'Arial',fontSize:`${obj.size}px`,fontWeight:obj.bold?'700':'400',fontStyle:obj.italic?'italic':'normal',textDecoration:obj.underline?'underline':'none',color:obj.color}}/>}
+              return <div key={obj.id} className={`edit-object ${obj.kind} ${selectedId===obj.id?'selected':''}`} style={style} onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}}>
+                {obj.kind==='text' && <textarea spellCheck="false" value={obj.text} onPointerDown={e=>{e.stopPropagation();setSelectedId(obj.id)}} onChange={e=>updateObject(obj.id,{text:e.target.value},false)} style={{fontFamily:fontCss(obj.font),fontSize:`${obj.size}px`,fontWeight:obj.bold?'700':'400',fontStyle:obj.italic?'italic':'normal',textDecoration:obj.underline?'underline':'none',color:obj.color}}/>}
                 {obj.kind==='signature' && <img src={obj.dataUrl} alt="signature" draggable="false"/>}
                 {obj.kind==='highlight' && <div className="fill" style={{background:obj.color,opacity:obj.opacity}}/>}
                 {obj.kind==='whiteout' && <div className="fill white"/>}
+                {selectedId===obj.id && <button className="move-handle" onPointerDown={e=>beginObjectDrag(e,obj)} title="Drag to move"><Move/></button>}
                 {selectedId===obj.id && <button className="resize-handle" onPointerDown={e=>beginResize(e,obj)} title="Resize"><Maximize2/></button>}
               </div>
             })}

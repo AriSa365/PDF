@@ -39,3 +39,13 @@ npm run build
 The included `.github/workflows/deploy.yml` deploys `dist` after every push to `main`. In GitHub, set **Settings → Pages → Source → GitHub Actions**.
 
 The Vite base is relative (`./`), so the build works from a repository subpath such as `https://arisa365.github.io/PDF/`.
+
+## v3 editor improvements
+
+- Selected objects now have a dedicated drag handle above the object. Drag the handle to move text, signatures, whiteouts, or highlights without interfering with text editing.
+- The font menu includes common browser/system fonts and fonts detected from the current PDF page.
+- **Match PDF text**: select an added text box, click **Match PDF text**, then click existing text on the page. The app copies the nearest detected font family and approximate size.
+- **Upload font** accepts `.ttf` and `.otf`. Uploaded fonts are loaded locally in the browser and embedded into exported PDFs using `@pdf-lib/fontkit`.
+
+### Font matching limitation
+PDF.js can usually identify a PDF's internal font/fallback family and text size, but browsers cannot always extract and legally/reliably reuse an embedded PDF font file. For exact exported typography, use **Upload font** with the matching TTF/OTF font that you already have. Without an uploaded font, detected/non-standard fonts are previewed with the closest browser font and exported with a standard PDF fallback.

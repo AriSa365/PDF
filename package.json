@@ -1,7 +1,7 @@
 {
   "name": "pdf-workbench",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,7 +15,8 @@
     "pdfjs-dist": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "vite": "latest"
+    "vite": "latest",
+    "@pdf-lib/fontkit": "latest"
   },
   "devDependencies": {}
 }
