@@ -64,6 +64,7 @@ export default function App() {
   const [highlightOpacity, setHighlightOpacity] = useState(()=>Number(localStorage.getItem('pdf-workbench-highlight-opacity') || .35))
   const [mergeOpen, setMergeOpen] = useState(false)
   const [mergeQueue, setMergeQueue] = useState([])
+  const [mergeOutputName, setMergeOutputName] = useState('merged.pdf')
 
   useEffect(()=>{ localStorage.setItem('pdf-workbench-highlight-color', highlightColor) },[highlightColor])
   useEffect(()=>{ localStorage.setItem('pdf-workbench-highlight-opacity', String(highlightOpacity)) },[highlightOpacity])
@@ -351,7 +352,9 @@ export default function App() {
         const pages=await out.copyPages(src,src.getPageIndices())
         pages.forEach(p=>out.addPage(p))
       }
-      downloadBytes(await out.save(),'merged.pdf')
+      const base=(mergeOutputName || 'merged.pdf').trim().replace(/[\\/:*?"<>|]+/g,'-')
+      const filename=base.toLowerCase().endsWith('.pdf')?base:`${base}.pdf`
+      downloadBytes(await out.save(),filename)
       setStatus(`Merged ${mergeQueue.length} staged PDF files in the displayed order.`)
       setMergeQueue([]); setMergeOpen(false)
     }catch(err){setStatus(`Merge failed: ${err.message}`)}finally{setBusy(false)}
@@ -600,8 +603,12 @@ export default function App() {
           <div className="merge-item-actions"><button disabled={i===0} onClick={()=>moveMergeItem(i,-1)} title="Move up">↑</button><button disabled={i===mergeQueue.length-1} onClick={()=>moveMergeItem(i,1)} title="Move down">↓</button><button className="remove" onClick={()=>removeMergeItem(item.id)} title="Remove"><Trash2/></button></div>
         </div>)}
       </div>}
+      <div className="merge-name-row">
+        <label htmlFor="merge-output-name">Merged PDF name</label>
+        <input id="merge-output-name" value={mergeOutputName} onChange={e=>setMergeOutputName(e.target.value)} placeholder="merged.pdf"/>
+      </div>
       <div className="merge-hint">You can close this window and return later. The staged PDFs remain available while this browser tab stays open.</div>
-      <div className="modal-actions merge-actions"><button onClick={()=>setMergeOpen(false)}>Keep staged & close</button><button className="primary" disabled={mergeQueue.length<2||busy} onClick={mergeStagedFiles}><Files/>Merge {mergeQueue.length>=2?`${mergeQueue.length} PDFs`:'PDFs'}</button></div>
+      <div className="modal-actions merge-actions"><button onClick={()=>setMergeOpen(false)}>Keep staged & close</button><button className="primary merge-submit" disabled={mergeQueue.length<2||busy} onClick={mergeStagedFiles}><Files/>{busy?'Merging…':`Merge ${mergeQueue.length>=2?`${mergeQueue.length} PDFs`:'PDFs'}`}</button></div>
     </div></div>}
 
     {signatureOpen && <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&setSignatureOpen(false)}><div className="modal">

@@ -67,6 +67,12 @@ For PDFs with embedded/subset fonts, detected family names may still be approxim
 - Conversion runs locally in the browser; no server upload is required.
 
 
-## v3.5 staged PDF merge
+## v3.5.1 staged PDF merge
 
 The Merge PDFs tool now keeps a staging queue. You can add PDFs from one folder or drive, reopen the file picker with **Add more PDFs**, add files from other locations, reorder or remove staged files, and merge only when the queue is complete. The staged queue remains available while the current browser tab stays open.
+
+
+## v3.5.1 merge fix
+- The Merge button is explicitly styled so it remains visible in the merge staging dialog.
+- Added a `Merged PDF name` field so you can choose the downloaded filename before merging.
+- If `.pdf` is omitted, it is added automatically. Invalid filename characters are replaced safely.
