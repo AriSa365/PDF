@@ -37,6 +37,7 @@ export default function App() {
   const stageRef = useRef(null)
   const signatureCanvasRef = useRef(null)
   const signatureDrawRef = useRef(null)
+  const mergeInputRef = useRef(null)
 
   const [file, setFile] = useState(null)
   const [bytes, setBytes] = useState(null)
@@ -61,6 +62,8 @@ export default function App() {
   const highlightPresets = ['#facc15','#86efac','#7dd3fc','#f9a8d4','#fdba74','#c4b5fd','#fca5a5','#d1d5db']
   const [highlightColor, setHighlightColor] = useState(()=>localStorage.getItem('pdf-workbench-highlight-color') || '#facc15')
   const [highlightOpacity, setHighlightOpacity] = useState(()=>Number(localStorage.getItem('pdf-workbench-highlight-opacity') || .35))
+  const [mergeOpen, setMergeOpen] = useState(false)
+  const [mergeQueue, setMergeQueue] = useState([])
 
   useEffect(()=>{ localStorage.setItem('pdf-workbench-highlight-color', highlightColor) },[highlightColor])
   useEffect(()=>{ localStorage.setItem('pdf-workbench-highlight-opacity', String(highlightOpacity)) },[highlightOpacity])
@@ -322,10 +325,36 @@ export default function App() {
     if(!bytes || pdf.numPages<=1)return
     const doc=await PDFDocument.load(bytes); doc.removePage(page-1); const out=await doc.save(); await openBytes(out,file.name)
   }
-  const mergeFiles = async e => {
-    const fs=[...e.target.files]; if(!fs.length)return
+  const stageMergeFiles = e => {
+    const fs=[...e.target.files]
+    if(!fs.length) return
+    setMergeQueue(prev=>[...prev,...fs.map(f=>({id:uid(),file:f}))])
+    setStatus(`Staged ${fs.length} PDF${fs.length>1?'s':''}. You can add files from another location before merging.`)
+    e.target.value=''
+  }
+  const removeMergeItem = id => setMergeQueue(prev=>prev.filter(item=>item.id!==id))
+  const moveMergeItem = (index, direction) => {
+    setMergeQueue(prev=>{
+      const next=[...prev], target=index+direction
+      if(target<0 || target>=next.length) return prev
+      ;[next[index],next[target]]=[next[target],next[index]]
+      return next
+    })
+  }
+  const mergeStagedFiles = async () => {
+    if(mergeQueue.length<2){setStatus('Stage at least two PDF files before merging.');return}
     setBusy(true)
-    try{const out=await PDFDocument.create();for(const f of fs){const src=await PDFDocument.load(await f.arrayBuffer());const pages=await out.copyPages(src,src.getPageIndices());pages.forEach(p=>out.addPage(p))}downloadBytes(await out.save(),'merged.pdf');setStatus(`Merged ${fs.length} PDF files.`)}catch(err){setStatus(`Merge failed: ${err.message}`)}finally{setBusy(false);e.target.value=''}
+    try{
+      const out=await PDFDocument.create()
+      for(const item of mergeQueue){
+        const src=await PDFDocument.load(await item.file.arrayBuffer())
+        const pages=await out.copyPages(src,src.getPageIndices())
+        pages.forEach(p=>out.addPage(p))
+      }
+      downloadBytes(await out.save(),'merged.pdf')
+      setStatus(`Merged ${mergeQueue.length} staged PDF files in the displayed order.`)
+      setMergeQueue([]); setMergeOpen(false)
+    }catch(err){setStatus(`Merge failed: ${err.message}`)}finally{setBusy(false)}
   }
   const imageToPdf = async e => {
     const fs=[...e.target.files]; if(!fs.length)return
@@ -467,7 +496,7 @@ export default function App() {
 
   return <div className="app">
     <header>
-      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v3.3 • local-first</span></div></div>
+      <div className="brand"><div className="logo">PDF</div><div><b>PDF Workbench</b><span>Editor v3.5 • local-first</span></div></div>
       <div className="status">{busy?'Working…':status}</div>
       <label className="primary"><Upload size={17}/> Open PDF<input hidden type="file" accept="application/pdf" onChange={onFile}/></label>
     </header>
@@ -487,7 +516,7 @@ export default function App() {
       <button onClick={extractPage} disabled={!pdf}><FileOutput/>Extract page</button>
       <button onClick={deletePage} disabled={!pdf || pdf?.numPages<=1}><Trash2/>Delete page</button>
       <div className="section">PDF TOOLS</div>
-      <label className="side-label"><Files/>Merge PDFs<input hidden multiple type="file" accept="application/pdf" onChange={mergeFiles}/></label>
+      <button onClick={()=>setMergeOpen(true)}><Files/>Merge PDFs{mergeQueue.length>0 && <span className="queue-badge">{mergeQueue.length}</span>}</button>
       <label className="side-label"><ImagePlus/>Images → PDF<input hidden multiple type="file" accept="image/png,image/jpeg" onChange={imageToPdf}/></label>
       <div className="section">SMART CONVERT</div>
       <div className="convert-agent-card">
@@ -555,6 +584,25 @@ export default function App() {
         </div>}
       </div>
     </main>
+
+    {mergeOpen && <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setMergeOpen(false)}}><div className="modal merge-modal">
+      <div className="modal-head"><div><h2>Merge PDFs</h2><p>Stage PDFs from as many folders, drives, or locations as you need. They will merge in the order shown.</p></div><button onClick={()=>setMergeOpen(false)}><X/></button></div>
+      <input ref={mergeInputRef} hidden multiple type="file" accept="application/pdf,.pdf" onChange={stageMergeFiles}/>
+      <div className="merge-add-row">
+        <button className="merge-add primary" onClick={()=>mergeInputRef.current?.click()}><Plus/>{mergeQueue.length?'Add more PDFs':'Add PDFs'}</button>
+        {mergeQueue.length>0 && <button className="merge-clear" onClick={()=>setMergeQueue([])}>Clear all</button>}
+        <span>{mergeQueue.length} file{mergeQueue.length===1?'':'s'} staged</span>
+      </div>
+      {mergeQueue.length===0 ? <div className="merge-empty"><Files/><b>No PDFs staged yet</b><span>Select PDFs from one location. Then click “Add more PDFs” to continue selecting from another location.</span></div> : <div className="merge-list">
+        {mergeQueue.map((item,i)=><div className="merge-item" key={item.id}>
+          <div className="merge-order">{i+1}</div>
+          <div className="merge-file"><b title={item.file.name}>{item.file.name}</b><span>{(item.file.size/1024/1024).toFixed(2)} MB</span></div>
+          <div className="merge-item-actions"><button disabled={i===0} onClick={()=>moveMergeItem(i,-1)} title="Move up">↑</button><button disabled={i===mergeQueue.length-1} onClick={()=>moveMergeItem(i,1)} title="Move down">↓</button><button className="remove" onClick={()=>removeMergeItem(item.id)} title="Remove"><Trash2/></button></div>
+        </div>)}
+      </div>}
+      <div className="merge-hint">You can close this window and return later. The staged PDFs remain available while this browser tab stays open.</div>
+      <div className="modal-actions merge-actions"><button onClick={()=>setMergeOpen(false)}>Keep staged & close</button><button className="primary" disabled={mergeQueue.length<2||busy} onClick={mergeStagedFiles}><Files/>Merge {mergeQueue.length>=2?`${mergeQueue.length} PDFs`:'PDFs'}</button></div>
+    </div></div>}
 
     {signatureOpen && <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&setSignatureOpen(false)}><div className="modal">
       <div className="modal-head"><div><h2>Add signature</h2><p>Draw, type, upload, or reuse your saved signature.</p></div><button onClick={()=>setSignatureOpen(false)}><X/></button></div>

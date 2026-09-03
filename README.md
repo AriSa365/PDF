@@ -65,3 +65,8 @@ For PDFs with embedded/subset fonts, detected family names may still be approxim
 - PDF → Word (.docx): extracts the PDF text into editable Word paragraphs. Complex columns/tables may require cleanup; scanned PDFs require OCR (planned).
 - PDF → PowerPoint (.pptx): creates one slide per PDF page and preserves the page appearance as a slide image.
 - Conversion runs locally in the browser; no server upload is required.
+
+
+## v3.5 staged PDF merge
+
+The Merge PDFs tool now keeps a staging queue. You can add PDFs from one folder or drive, reopen the file picker with **Add more PDFs**, add files from other locations, reorder or remove staged files, and merge only when the queue is complete. The staged queue remains available while the current browser tab stays open.
